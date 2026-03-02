@@ -8,5 +8,6 @@
     "editor.defaultFormatter": "ms-vscode.cpptools"
   },
 
-  "C_Cpp.clang_format_style": "{ BasedOnStyle: LLVM, BreakBeforeBraces: Attach }"
+  "C_Cpp.clang_format_style": "{ BasedOnStyle: LLVM, BreakBeforeBraces: Attach }",
+  "idf.currentSetup": "/Users/tallesrocha/.espressif/v5.5.2/esp-idf"
 }
