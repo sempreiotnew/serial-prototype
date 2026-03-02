@@ -492,6 +492,28 @@ static void gpio_init_all(void) {
 
 /* ===================== MAIN ===================== */
 
+/* ===================== PERIODIC SEND TASK ===================== */
+static void periodic_send_task(void *arg) {
+  while (1) {
+    espnow_msg_t msg = {0};
+    memcpy(msg.origin_mac, my_mac, 6);
+    memcpy(msg.src_mac, my_mac, 6);
+    msg.msg_id = local_msg_counter++;
+    msg.ttl = DEFAULT_TTL;
+    msg.type = MSG_TYPE_DATA;
+    msg.forwarded = false;
+
+    // Optional: put some data
+    snprintf((char *)msg.data, sizeof(msg.data), "ping");
+
+    ESP_LOGI(TAG, "PERIODIC → DATA id=%lu", msg.msg_id);
+
+    xQueueSend(tx_queue, &msg, 0);
+
+    vTaskDelay(pdMS_TO_TICKS(5000)); // wait 5 seconds
+  }
+}
+
 void run_now(void) {
   nvs_flash_init();
 
@@ -508,6 +530,8 @@ void run_now(void) {
   xTaskCreate(espnow_tx_task, "tx", 4096, NULL, 5, NULL);
   xTaskCreate(button_task, "button", 2048, NULL, 4, NULL);
   xTaskCreate(discovery_task, "discovery", 2048, NULL, 3, NULL);
+
+  xTaskCreate(periodic_send_task, "periodic_send", 2048, NULL, 4, NULL);
 
   ESP_LOGI(TAG, "ESP-NOW MESH READY");
 }
