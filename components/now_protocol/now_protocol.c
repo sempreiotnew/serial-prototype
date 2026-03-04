@@ -43,15 +43,6 @@ static QueueHandle_t tx_queue;
 
 static uint32_t local_msg_counter = 1;
 
-/* ===================== PROTOCOL ===================== */
-
-typedef enum {
-  MSG_TYPE_DISCOVERY = 0x01,
-  MSG_TYPE_DATA = 0x02,
-  MSG_TYPE_ACK = 0x03,
-  MSG_TYPE_INFO = 0x04,
-} msg_type_t;
-
 /* ===================== PEERS ===================== */
 
 typedef struct {
@@ -192,8 +183,8 @@ static void add_peer(const uint8_t *mac) {
 
 static void espnow_recv_cb(const esp_now_recv_info_t *info, const uint8_t *data,
                            int len) {
-  if (len != sizeof(espnow_msg_t))
-    return;
+  // if (len != sizeof(espnow_msg_t))
+  //   return;
 
   espnow_msg_t msg;
   memcpy(&msg, data, sizeof(msg));
@@ -287,6 +278,20 @@ static void espnow_rx_task(void *arg) {
       break;
     }
 
+    case MSG_TYPE_INFO: {
+      log_msg("RX", &msg);
+      send_to_serial(&msg);
+      ESP_LOGI(TAG, "INFO RECEIVED → %d peers", msg.peer_count);
+
+      for (int i = 0; i < msg.peer_count; i++) {
+        ESP_LOGI(TAG, "PEER %d → %02X:%02X:%02X:%02X:%02X:%02X", i,
+                 msg.peer_macs[i][0], msg.peer_macs[i][1], msg.peer_macs[i][2],
+                 msg.peer_macs[i][3], msg.peer_macs[i][4], msg.peer_macs[i][5]);
+      }
+
+      break;
+    }
+
     default:
       break;
     }
@@ -347,6 +352,19 @@ static void espnow_tx_task(void *arg) {
       case MSG_TYPE_DISCOVERY:
         // esp_now_send(ESPNOW_BROADCAST_MAC, (uint8_t *)&msg, sizeof(msg));
         espnow_send_checked(ESPNOW_BROADCAST_MAC, &msg);
+        break;
+
+      case MSG_TYPE_INFO:
+        if (msg.forwarded) {
+          espnow_send_checked(msg.dest_mac, &msg);
+        } else {
+          for (int i = 0; i < MAX_PEERS; i++) {
+            if (!peers[i].active)
+              continue;
+
+            espnow_send_checked(peers[i].mac, &msg);
+          }
+        }
         break;
 
       default:
@@ -438,6 +456,42 @@ static void gpio_init_all(void) {
   gpio_config(&btn);
 }
 
+static void info_task(void *arg) {
+  while (1) {
+
+    espnow_msg_t msg = {0};
+
+    memcpy(msg.origin_mac, my_mac, 6);
+    memcpy(msg.src_mac, my_mac, 6);
+
+    msg.msg_id = local_msg_counter++;
+    msg.ttl = DEFAULT_TTL;
+    msg.type = MSG_TYPE_INFO;
+    msg.forwarded = false;
+
+    uint8_t count = 0;
+
+    for (int i = 0; i < MAX_PEERS; i++) {
+      if (!peers[i].active)
+        continue;
+
+      memcpy(msg.peer_macs[count], peers[i].mac, 6);
+      count++;
+
+      if (count >= 10)
+        break;
+    }
+
+    msg.peer_count = count;
+
+    ESP_LOGI(TAG, "INFO → sending %d peers", count);
+
+    xQueueSend(tx_queue, &msg, 0);
+
+    vTaskDelay(pdMS_TO_TICKS(30000));
+  }
+}
+
 /* ===================== MAIN ===================== */
 
 void run_now(void) {
@@ -456,6 +510,7 @@ void run_now(void) {
   xTaskCreate(espnow_tx_task, "tx", 4096, NULL, 5, NULL);
   xTaskCreate(button_task, "button", 2048, NULL, 4, NULL);
   xTaskCreate(discovery_task, "discovery", 2048, NULL, 3, NULL);
+  xTaskCreate(info_task, "info", 4096, NULL, 3, NULL);
 
   ESP_LOGI(TAG, "ESP-NOW MESH READY");
 }
