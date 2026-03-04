@@ -48,34 +48,72 @@ bool send_to_serial(const espnow_msg_t *msg) {
     return false;
   }
 
-  char buffer[256];
+  char buffer[512]; // increased because peer list can be large
+  int len = 0;
 
-  int len = snprintf(buffer, sizeof(buffer),
-                     "%02X%02X%02X%02X%02X%02X;" // src_mac
-                     "%02X%02X%02X%02X%02X%02X;" // dest_mac
-                     "%02X%02X%02X%02X%02X%02X;" // origin_mac
-                     "%d;"                       // rssi
-                     "%lu;"                      // msg_id
-                     "%u;"                       // ttl
-                     "%u;"                       // type
-                     "%s\n",                     // data
-                     msg->src_mac[0], msg->src_mac[1], msg->src_mac[2],
-                     msg->src_mac[3], msg->src_mac[4], msg->src_mac[5],
+  if (msg->type == MSG_TYPE_INFO) {
 
-                     msg->dest_mac[0], msg->dest_mac[1], msg->dest_mac[2],
-                     msg->dest_mac[3], msg->dest_mac[4], msg->dest_mac[5],
+    // Base header (without data)
+    len = snprintf(buffer, sizeof(buffer),
+                   "%02X%02X%02X%02X%02X%02X;"
+                   "%02X%02X%02X%02X%02X%02X;"
+                   "%02X%02X%02X%02X%02X%02X;"
+                   "%d;%lu;%u;%u;",
+                   msg->src_mac[0], msg->src_mac[1], msg->src_mac[2],
+                   msg->src_mac[3], msg->src_mac[4], msg->src_mac[5],
 
-                     msg->origin_mac[0], msg->origin_mac[1], msg->origin_mac[2],
-                     msg->origin_mac[3], msg->origin_mac[4], msg->origin_mac[5],
+                   msg->dest_mac[0], msg->dest_mac[1], msg->dest_mac[2],
+                   msg->dest_mac[3], msg->dest_mac[4], msg->dest_mac[5],
 
-                     msg->rssi, (unsigned long)msg->msg_id, msg->ttl, msg->type,
-                     msg->data);
+                   msg->origin_mac[0], msg->origin_mac[1], msg->origin_mac[2],
+                   msg->origin_mac[3], msg->origin_mac[4], msg->origin_mac[5],
+
+                   msg->rssi, (unsigned long)msg->msg_id, msg->ttl, msg->type);
+
+    if (len <= 0 || len >= sizeof(buffer))
+      return false;
+
+    // Append peer list
+    for (int i = 0; i < msg->peer_count; i++) {
+      len += snprintf(
+          buffer + len, sizeof(buffer) - len, "%02X%02X%02X%02X%02X%02X",
+          msg->peer_macs[i][0], msg->peer_macs[i][1], msg->peer_macs[i][2],
+          msg->peer_macs[i][3], msg->peer_macs[i][4], msg->peer_macs[i][5]);
+
+      if (i < msg->peer_count - 1) {
+        len += snprintf(buffer + len, sizeof(buffer) - len, ",");
+      }
+    }
+
+    // End line
+    len += snprintf(buffer + len, sizeof(buffer) - len, "\n");
+
+  } else {
+
+    // Normal DATA / ACK / DISCOVERY
+    len = snprintf(buffer, sizeof(buffer),
+                   "%02X%02X%02X%02X%02X%02X;"
+                   "%02X%02X%02X%02X%02X%02X;"
+                   "%02X%02X%02X%02X%02X%02X;"
+                   "%d;%lu;%u;%u;%s\n",
+
+                   msg->src_mac[0], msg->src_mac[1], msg->src_mac[2],
+                   msg->src_mac[3], msg->src_mac[4], msg->src_mac[5],
+
+                   msg->dest_mac[0], msg->dest_mac[1], msg->dest_mac[2],
+                   msg->dest_mac[3], msg->dest_mac[4], msg->dest_mac[5],
+
+                   msg->origin_mac[0], msg->origin_mac[1], msg->origin_mac[2],
+                   msg->origin_mac[3], msg->origin_mac[4], msg->origin_mac[5],
+
+                   msg->rssi, (unsigned long)msg->msg_id, msg->ttl, msg->type,
+                   msg->data);
+  }
 
   if (len <= 0 || len >= sizeof(buffer)) {
     return false;
   }
 
   int written = uart_write_bytes(UART_PORT, buffer, len);
-
   return (written == len);
 }
