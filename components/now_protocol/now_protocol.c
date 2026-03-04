@@ -212,21 +212,21 @@ static void espnow_rx_task(void *arg) {
         }
       }
     }
-  }
 
-  if (msg.type == MSG_TYPE_INFO) {
+    if (msg.type == MSG_TYPE_INFO) {
 
-    ESP_LOGI(TAG, "INFO RECEIVED from %s → %d peers", mac_to_str(msg.src_mac),
-             msg.peer_count);
+      ESP_LOGI(TAG, "INFO RECEIVED from %s → %d peers", mac_to_str(msg.src_mac),
+               msg.peer_count);
 
-    for (int i = 0; i < msg.peer_count; i++) {
-      ESP_LOGI(TAG, "  PEER %d → %02X:%02X:%02X:%02X:%02X:%02X", i,
-               msg.peer_macs[i][0], msg.peer_macs[i][1], msg.peer_macs[i][2],
-               msg.peer_macs[i][3], msg.peer_macs[i][4], msg.peer_macs[i][5]);
+      for (int i = 0; i < msg.peer_count; i++) {
+        ESP_LOGI(TAG, "  PEER %d → %02X:%02X:%02X:%02X:%02X:%02X", i,
+                 msg.peer_macs[i][0], msg.peer_macs[i][1], msg.peer_macs[i][2],
+                 msg.peer_macs[i][3], msg.peer_macs[i][4], msg.peer_macs[i][5]);
+      }
+
+      // Send to serial (so PC can see full mesh topology)
+      send_to_serial(&msg);
     }
-
-    // Send to serial (so PC can see full mesh topology)
-    send_to_serial(&msg);
   }
 }
 
