@@ -66,18 +66,31 @@ static bool mac_equal(const uint8_t *a, const uint8_t *b) {
   return memcmp(a, b, 6) == 0;
 }
 
-static const char *msg_type_to_str(uint8_t type) {
-  switch (type) {
+const char *msg_type_to_str(uint8_t type) {
+  switch ((msg_type_t)type) {
   case MSG_TYPE_DISCOVERY:
-    return "DISCOVERY";
+    return "MSG_TYPE_DISCOVERY";
+
   case MSG_TYPE_DATA:
-    return "DATA";
+    return "MSG_TYPE_DATA";
+
   case MSG_TYPE_ACK:
-    return "ACK";
+    return "MSG_TYPE_ACK";
+
   case MSG_TYPE_INFO:
-    return "INFO";
+    return "MSG_TYPE_INFO";
+
+  case MSG_TYPE_FWD:
+    return "MSG_TYPE_FWD";
+
+  case MSG_TYPE_PING:
+    return "MSG_TYPE_PING";
+
+  case MSG_TYPE_PONG:
+    return "MSG_TYPE_PONG";
+
   default:
-    return "UNKNOWN";
+    return "MSG_UNKNOWN";
   }
 }
 
