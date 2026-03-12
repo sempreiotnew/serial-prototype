@@ -1,9 +1,9 @@
 #include "serial_communication.h"
 #include "driver/uart.h"
 #include "esp_log.h"
+#include "espnow_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "now_protocol.h"
 #include <string.h>
 
 #define UART_PORT UART_NUM_0
@@ -44,75 +44,53 @@ void serial_task(void *pvParameters) {
 }
 
 bool send_to_serial(const espnow_msg_t *msg) {
-  if (msg == NULL) {
+  if (!msg)
     return false;
-  }
 
-  char buffer[512]; // increased because peer list can be large
+  char buffer[512]; // enough for data + peers
   int len = 0;
 
-  if (msg->type == MSG_TYPE_INFO) {
+  // Base format: type;msg_id;origin;dest;src;rssi;ttl;
+  len = snprintf(buffer, sizeof(buffer),
+                 "%u;%lu;"
+                 "%02X%02X%02X%02X%02X%02X;"
+                 "%02X%02X%02X%02X%02X%02X;"
+                 "%02X%02X%02X%02X%02X%02X;"
+                 "%d;%u;",
+                 msg->type, (unsigned long)msg->msg_id, msg->origin_mac[0],
+                 msg->origin_mac[1], msg->origin_mac[2], msg->origin_mac[3],
+                 msg->origin_mac[4], msg->origin_mac[5], msg->dest_mac[0],
+                 msg->dest_mac[1], msg->dest_mac[2], msg->dest_mac[3],
+                 msg->dest_mac[4], msg->dest_mac[5], msg->src_mac[0],
+                 msg->src_mac[1], msg->src_mac[2], msg->src_mac[3],
+                 msg->src_mac[4], msg->src_mac[5], msg->rssi, msg->ttl);
 
-    // Base header (without data)
-    len = snprintf(buffer, sizeof(buffer),
-                   "%02X%02X%02X%02X%02X%02X;"
-                   "%02X%02X%02X%02X%02X%02X;"
-                   "%02X%02X%02X%02X%02X%02X;"
-                   "%d;%lu;%u;%u;",
-                   msg->src_mac[0], msg->src_mac[1], msg->src_mac[2],
-                   msg->src_mac[3], msg->src_mac[4], msg->src_mac[5],
+  if (len <= 0 || len >= sizeof(buffer))
+    return false;
 
-                   msg->dest_mac[0], msg->dest_mac[1], msg->dest_mac[2],
-                   msg->dest_mac[3], msg->dest_mac[4], msg->dest_mac[5],
+  // Append data for DATA / ACK / INFO / DISCOVERY messages
+  if (msg->type != MSG_TYPE_INFO) {
+    len += snprintf(buffer + len, sizeof(buffer) - len, "%s;", msg->data);
+  }
 
-                   msg->origin_mac[0], msg->origin_mac[1], msg->origin_mac[2],
-                   msg->origin_mac[3], msg->origin_mac[4], msg->origin_mac[5],
-
-                   msg->rssi, (unsigned long)msg->msg_id, msg->ttl, msg->type);
-
-    if (len <= 0 || len >= sizeof(buffer))
-      return false;
-
-    // Append peer list
+  // Append peer list if INFO message
+  if (msg->type == MSG_TYPE_INFO && msg->peer_count > 0) {
     for (int i = 0; i < msg->peer_count; i++) {
       len += snprintf(
           buffer + len, sizeof(buffer) - len, "%02X%02X%02X%02X%02X%02X",
           msg->peer_macs[i][0], msg->peer_macs[i][1], msg->peer_macs[i][2],
           msg->peer_macs[i][3], msg->peer_macs[i][4], msg->peer_macs[i][5]);
-
       if (i < msg->peer_count - 1) {
         len += snprintf(buffer + len, sizeof(buffer) - len, ",");
       }
     }
-
-    // End line
-    len += snprintf(buffer + len, sizeof(buffer) - len, "\n");
-
-  } else {
-
-    // Normal DATA / ACK / DISCOVERY
-    len = snprintf(buffer, sizeof(buffer),
-                   "%02X%02X%02X%02X%02X%02X;"
-                   "%02X%02X%02X%02X%02X%02X;"
-                   "%02X%02X%02X%02X%02X%02X;"
-                   "%d;%lu;%u;%u;%s\n",
-
-                   msg->src_mac[0], msg->src_mac[1], msg->src_mac[2],
-                   msg->src_mac[3], msg->src_mac[4], msg->src_mac[5],
-
-                   msg->dest_mac[0], msg->dest_mac[1], msg->dest_mac[2],
-                   msg->dest_mac[3], msg->dest_mac[4], msg->dest_mac[5],
-
-                   msg->origin_mac[0], msg->origin_mac[1], msg->origin_mac[2],
-                   msg->origin_mac[3], msg->origin_mac[4], msg->origin_mac[5],
-
-                   msg->rssi, (unsigned long)msg->msg_id, msg->ttl, msg->type,
-                   msg->data);
   }
 
-  if (len <= 0 || len >= sizeof(buffer)) {
+  // End line
+  len += snprintf(buffer + len, sizeof(buffer) - len, "\n");
+
+  if (len <= 0 || len >= sizeof(buffer))
     return false;
-  }
 
   int written = uart_write_bytes(UART_PORT, buffer, len);
   return (written == len);

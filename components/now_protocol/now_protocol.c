@@ -18,6 +18,9 @@
 #include "now_protocol.h"
 #include "serial_communication.h"
 
+#include "data_serialize.h"
+#include "espnow_types.h"
+
 /* ===================== CONFIG ===================== */
 
 #define TAG "now_protocol.c"
@@ -82,6 +85,15 @@ const char *msg_type_to_str(uint8_t type) {
   case MSG_TYPE_INFO:
     return "MSG_TYPE_INFO";
 
+  case MSG_TYPE_FWD:
+    return "MSG_TYPE_FWD";
+
+  case MSG_TYPE_PING:
+    return "MSG_TYPE_PING";
+
+  case MSG_TYPE_PONG:
+    return "MSG_TYPE_PONG";
+
   default:
     return "MSG_UNKNOWN";
   }
@@ -119,19 +131,16 @@ static void log_msg(const char *prefix, const espnow_msg_t *m) {
            "%s type=%s id=%u ttl=%u rssi=%d "
            "src=%02X:%02X:%02X:%02X:%02X:%02X "
            "dest=%02X:%02X:%02X:%02X:%02X:%02X "
-           "origin=%02X:%02X:%02X:%02X:%02X:%02X",
+           "origin=%02X:%02X:%02X:%02X:%02X:%02X "
+           "data=%s",
            prefix, msg_type_to_str(m->type), m->msg_id, m->ttl, m->rssi,
-
            m->src_mac[0], m->src_mac[1], m->src_mac[2], m->src_mac[3],
-           m->src_mac[4], m->src_mac[5],
-
-           m->dest_mac[0], m->dest_mac[1], m->dest_mac[2], m->dest_mac[3],
-           m->dest_mac[4], m->dest_mac[5],
-
+           m->src_mac[4], m->src_mac[5], m->dest_mac[0], m->dest_mac[1],
+           m->dest_mac[2], m->dest_mac[3], m->dest_mac[4], m->dest_mac[5],
            m->origin_mac[0], m->origin_mac[1], m->origin_mac[2],
-           m->origin_mac[3], m->origin_mac[4], m->origin_mac[5]);
+           m->origin_mac[3], m->origin_mac[4], m->origin_mac[5],
+           m->data[0] ? m->data : "{}"); // show {} if no data
 }
-
 /* ===================== DEDUP ===================== */
 
 static bool msg_seen(const espnow_msg_t *m) {
@@ -183,9 +192,11 @@ static void add_peer(const uint8_t *mac) {
 
 static void espnow_recv_cb(const esp_now_recv_info_t *info, const uint8_t *data,
                            int len) {
-  // if (len != sizeof(espnow_msg_t))
-  //   return;
 
+  if (len != sizeof(espnow_msg_t)) {
+    ESP_LOGW(TAG, "Invalid packet size: %d", len);
+    return;
+  }
   espnow_msg_t msg;
   memcpy(&msg, data, sizeof(msg));
   memcpy(msg.src_mac, info->src_addr, 6);
@@ -193,6 +204,85 @@ static void espnow_recv_cb(const esp_now_recv_info_t *info, const uint8_t *data,
   msg.rssi = info->rx_ctrl->rssi;
 
   xQueueSendFromISR(rx_queue, &msg, NULL);
+}
+
+static esp_err_t espnow_send_checked(const uint8_t *dest_mac,
+                                     espnow_msg_t *msg) {
+  esp_err_t err = esp_now_send(dest_mac, (uint8_t *)msg, sizeof(espnow_msg_t));
+
+  if (err == ESP_OK) {
+
+    if (msg->type != MSG_TYPE_DISCOVERY) {
+      memcpy(msg->dest_mac, dest_mac, 6);
+      log_msg("TX", msg);
+    }
+
+    // if (msg->type == MSG_TYPE_DATA || msg->type == MSG_TYPE_INFO) {
+    //   send_to_serial(msg);
+    // }
+
+  } else {
+    ESP_LOGE(TAG, "TX FAIL (%s) type=%s id=%lu → %s", esp_err_to_name(err),
+             msg_type_to_str(msg->type), msg->msg_id, mac_to_str(dest_mac));
+  }
+
+  return err;
+}
+
+// void forward(espnow_msg_t msg) {
+//   // Forward message to other peers if TTL > 0
+//   if (msg.ttl > 0) {
+//     for (int i = 0; i < MAX_PEERS; i++) {
+//       if (!peers[i].active)
+//         continue;
+
+//       // Skip immediate sender and self
+//       if (mac_equal(peers[i].mac, msg.src_mac) ||
+//           mac_equal(peers[i].mac, my_mac))
+//         continue;
+
+//       espnow_msg_t fwd = msg; // copy original message
+//       fwd.ttl--;              // decrease TTL
+//       fwd.forwarded = true;   // mark as forwarded
+//       memcpy(fwd.src_mac, my_mac, 6);
+//       memcpy(fwd.dest_mac, peers[i].mac, 6);
+
+//       xQueueSend(tx_queue, &fwd, 0);
+//       log_msg("FWD", &fwd);
+//       // send_to_serial(&fwd);
+//     }
+//   }
+// }
+
+void forward(espnow_msg_t *msg) {
+
+  // Stop if TTL expired
+  if (msg->ttl == 0)
+    return;
+
+  // Stop if message already reached destination
+  if (mac_equal(msg->dest_mac, my_mac))
+    return;
+
+  espnow_msg_t fwd = *msg;
+  fwd.ttl--;
+  fwd.forwarded = true;
+  memcpy(fwd.src_mac, my_mac, 6);
+
+  for (int i = 0; i < MAX_PEERS; i++) {
+
+    if (!peers[i].active)
+      continue;
+
+    // avoid sending back to the node that sent it
+    if (mac_equal(peers[i].mac, msg->src_mac))
+      continue;
+
+    memcpy(fwd.dest_mac, peers[i].mac, 6);
+
+    xQueueSend(tx_queue, &fwd, 0);
+    log_msg("FWD", &fwd);
+  }
 }
 
 /* ===================== RX TASK ===================== */
@@ -214,24 +304,27 @@ static void espnow_rx_task(void *arg) {
 
     if (msg.type == MSG_TYPE_DISCOVERY) {
       add_peer(msg.src_mac);
-    } else {
-      log_msg("RX", &msg);
     }
+    //  else {
+    //   log_msg("RX", &msg);
+    // }
 
-    if (msg.type != MSG_TYPE_ACK) {
+    if (msg.type != MSG_TYPE_ACK && msg.type != MSG_TYPE_PING &&
+        msg.type != MSG_TYPE_PONG) {
       if (msg_seen(&msg))
         continue;
     }
 
-    if (msg.type == MSG_TYPE_DATA || msg.type == MSG_TYPE_INFO) {
-      send_to_serial(&msg);
-    }
+    if (msg.type != MSG_TYPE_DISCOVERY)
+      log_msg("RX", &msg);
 
     switch (msg.type) {
     case MSG_TYPE_ACK: {
-      ESP_LOGI(TAG, "CONFIRMED msg_id=%lu by %02X:%02X:%02X:%02X:%02X:%02X",
-               msg.msg_id, msg.src_mac[0], msg.src_mac[1], msg.src_mac[2],
-               msg.src_mac[3], msg.src_mac[4], msg.src_mac[5]);
+      // ESP_LOGI(TAG, "CONFIRMED msg_id=%lu by %02X:%02X:%02X:%02X:%02X:%02X",
+      //          msg.msg_id, msg.src_mac[0], msg.src_mac[1], msg.src_mac[2],
+      //          msg.src_mac[3], msg.src_mac[4], msg.src_mac[5]);
+      memset(msg.data, 0, sizeof(msg.data));
+      // send_to_serial(&msg);
       break;
     }
 
@@ -247,48 +340,40 @@ static void espnow_rx_task(void *arg) {
       ack.type = MSG_TYPE_ACK;
       xQueueSend(tx_queue, &ack, 0);
 
-      // Dedup: if already seen, do not forward
-      if (msg_seen(&msg))
-        break;
-
-      // Forward message to other peers if TTL > 0
-      if (msg.ttl > 0) {
-        for (int i = 0; i < MAX_PEERS; i++) {
-          if (!peers[i].active)
-            continue;
-
-          // Skip immediate sender and self
-          if (mac_equal(peers[i].mac, msg.src_mac) ||
-              mac_equal(peers[i].mac, my_mac))
-            continue;
-
-          espnow_msg_t fwd = msg; // copy original message
-          fwd.ttl--;              // decrease TTL
-          fwd.forwarded = true;   // mark as forwarded
-          memcpy(fwd.src_mac, my_mac, 6);
-          memcpy(fwd.dest_mac, peers[i].mac, 6);
-
-          xQueueSend(tx_queue, &fwd, 0);
-          log_msg("FWD", &fwd);
-        }
-      }
+      forward(&msg);
 
       // Deliver to serial / application layer
-      send_to_serial(&msg);
+      // send_to_serial(&msg);
       break;
     }
 
     case MSG_TYPE_INFO: {
-      log_msg("RX", &msg);
-      send_to_serial(&msg);
-      ESP_LOGI(TAG, "INFO RECEIVED → %d peers", msg.peer_count);
+      // send_to_serial(&msg);
+      // ESP_LOGI(TAG, "INFO RECEIVED → %d peers", msg.peer_count);
 
-      for (int i = 0; i < msg.peer_count; i++) {
-        ESP_LOGI(TAG, "PEER %d → %02X:%02X:%02X:%02X:%02X:%02X", i,
-                 msg.peer_macs[i][0], msg.peer_macs[i][1], msg.peer_macs[i][2],
-                 msg.peer_macs[i][3], msg.peer_macs[i][4], msg.peer_macs[i][5]);
-      }
+      // for (int i = 0; i < msg.peer_count; i++) {
+      //   ESP_LOGI(TAG, "PEER %d → %02X:%02X:%02X:%02X:%02X:%02X", i,
+      //            msg.peer_macs[i][0], msg.peer_macs[i][1],
+      //            msg.peer_macs[i][2], msg.peer_macs[i][3],
+      //            msg.peer_macs[i][4], msg.peer_macs[i][5]);
+      // }
 
+      break;
+    }
+
+    case MSG_TYPE_PING: {
+      espnow_msg_t pong = {0};
+
+      memcpy(pong.origin_mac, my_mac, 6);
+      memcpy(pong.src_mac, my_mac, 6);
+      memcpy(pong.dest_mac, msg.src_mac, 6);
+      // memcpy(pong.dest_mac, msg.origin_mac, 6);
+
+      pong.msg_id = msg.msg_id;
+      pong.type = MSG_TYPE_PONG;
+
+      // xQueueSend(tx_queue, &pong, 0);
+      espnow_send_checked(pong.dest_mac, &pong);
       break;
     }
 
@@ -296,29 +381,6 @@ static void espnow_rx_task(void *arg) {
       break;
     }
   }
-}
-
-static esp_err_t espnow_send_checked(const uint8_t *dest_mac,
-                                     espnow_msg_t *msg) {
-  esp_err_t err = esp_now_send(dest_mac, (uint8_t *)msg, sizeof(espnow_msg_t));
-
-  if (err == ESP_OK) {
-
-    if (msg->type != MSG_TYPE_DISCOVERY) {
-      memcpy(msg->dest_mac, dest_mac, 6);
-      log_msg("TX", msg);
-    }
-
-    if (msg->type == MSG_TYPE_DATA || msg->type == MSG_TYPE_INFO) {
-      send_to_serial(msg);
-    }
-
-  } else {
-    ESP_LOGE(TAG, "TX FAIL (%s) type=%s id=%lu → %s", esp_err_to_name(err),
-             msg_type_to_str(msg->type), msg->msg_id, mac_to_str(dest_mac));
-  }
-
-  return err;
 }
 
 /* ===================== TX TASK ===================== */
@@ -346,7 +408,7 @@ static void espnow_tx_task(void *arg) {
         break;
 
       case MSG_TYPE_ACK:
-        // esp_now_send(msg.origin_mac, (uint8_t *)&msg, sizeof(msg));
+        memset(msg.data, 0, sizeof(msg.data));
         espnow_send_checked(msg.origin_mac, &msg);
         break;
       case MSG_TYPE_DISCOVERY:
@@ -365,6 +427,14 @@ static void espnow_tx_task(void *arg) {
             espnow_send_checked(peers[i].mac, &msg);
           }
         }
+        break;
+
+      case MSG_TYPE_PING:
+        espnow_send_checked(msg.dest_mac, &msg);
+        break;
+
+      case MSG_TYPE_PONG:
+        espnow_send_checked(msg.dest_mac, &msg);
         break;
 
       default:
@@ -411,7 +481,9 @@ static void button_task(void *arg) {
       msg.type = MSG_TYPE_DATA;
       msg.forwarded = false;
 
-      ESP_LOGI(TAG, "BUTTON → DATA id=%lu", msg.msg_id);
+      char *json = espnow_msg_to_json(&msg);
+      strncpy(msg.data, json, sizeof(msg.data) - 1);
+      msg.data[sizeof(msg.data) - 1] = '\0';
 
       xQueueSend(tx_queue, &msg, 0);
       blink_led(2, 80);
@@ -484,9 +556,34 @@ static void info_task(void *arg) {
 
     msg.peer_count = count;
 
-    ESP_LOGI(TAG, "INFO → sending %d peers", count);
+    // ESP_LOGI(TAG, "INFO → sending %d peers", count);
 
     xQueueSend(tx_queue, &msg, 0);
+
+    vTaskDelay(pdMS_TO_TICKS(30000));
+  }
+}
+
+static void ping_peer_devices_task(void *arg) {
+
+  while (1) {
+    for (uint8_t i = 0; i < MAX_PEERS; i++) {
+      if (!peers[i].active)
+        continue;
+
+      espnow_msg_t msg = {0};
+
+      memcpy(msg.origin_mac, my_mac, 6);
+      memcpy(msg.dest_mac, peers[i].mac, 6);
+      memcpy(msg.src_mac, my_mac, 6);
+
+      msg.msg_id = local_msg_counter++;
+      msg.ttl = DEFAULT_TTL;
+      msg.type = MSG_TYPE_PING;
+      msg.forwarded = false;
+
+      xQueueSend(tx_queue, &msg, 0);
+    }
 
     vTaskDelay(pdMS_TO_TICKS(30000));
   }
@@ -508,9 +605,10 @@ void run_now(void) {
 
   xTaskCreate(espnow_rx_task, "rx", 4096, NULL, 5, NULL);
   xTaskCreate(espnow_tx_task, "tx", 4096, NULL, 5, NULL);
-  xTaskCreate(button_task, "button", 2048, NULL, 4, NULL);
+  xTaskCreate(button_task, "button", 4096, NULL, 4, NULL);
   xTaskCreate(discovery_task, "discovery", 2048, NULL, 3, NULL);
-  xTaskCreate(info_task, "info", 4096, NULL, 3, NULL);
+  // xTaskCreate(info_task, "info", 4096, NULL, 3, NULL);
+  xTaskCreate(ping_peer_devices_task, "ping", 4096, NULL, 3, NULL);
 
   ESP_LOGI(TAG, "ESP-NOW MESH READY");
 }
