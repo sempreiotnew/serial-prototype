@@ -53,3 +53,22 @@ char *espnow_msg_to_json(const espnow_msg_t *msg) {
 
   return json;
 }
+
+bool get_dest_mac_from_json(const char *json, uint8_t mac[6]) {
+  cJSON *root = cJSON_Parse(json);
+  if (!root) {
+    return false;
+  }
+
+  cJSON *dest = cJSON_GetObjectItem(root, "dest_mac");
+  if (!cJSON_IsString(dest)) {
+    cJSON_Delete(root);
+    return false;
+  }
+
+  sscanf(dest->valuestring, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx", &mac[0], &mac[1],
+         &mac[2], &mac[3], &mac[4], &mac[5]);
+
+  cJSON_Delete(root);
+  return true;
+}

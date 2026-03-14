@@ -260,9 +260,12 @@ void forward(espnow_msg_t *msg) {
   if (msg->ttl == 0)
     return;
 
-  // Stop if message already reached destination
-  if (mac_equal(msg->dest_mac, my_mac))
+  uint8_t final_dest[6];
+
+  if (!get_dest_mac_from_json(msg->data, final_dest)) {
+    ESP_LOGW(TAG, "JSON Could not parse destination");
     return;
+  }
 
   espnow_msg_t fwd = *msg;
   fwd.ttl--;
