@@ -1,4 +1,5 @@
 #pragma once
+#include "espnow_types.h"
 #include "now_protocol.h"
 #include <stdbool.h>
 

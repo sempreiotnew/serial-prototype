@@ -1,7 +1,8 @@
 idf_component_register(
-    SRCS "serial_communication.c"
+    SRCS "json_serialize.c"
     INCLUDE_DIRS "include"
-    REQUIRES driver 
-        now_protocol
+    REQUIRES 
         structure_types
+        json
+        esp_timer
 )

@@ -8,4 +8,6 @@ idf_component_register(
         nvs_flash
         driver
         serial_communication
+        structure_types
+        data_serialize
 )

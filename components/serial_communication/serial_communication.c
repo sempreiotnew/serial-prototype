@@ -1,6 +1,8 @@
 #include "serial_communication.h"
 #include "driver/uart.h"
 #include "esp_log.h"
+#include "esp_types.h"
+#include "espnow_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "now_protocol.h"
@@ -43,74 +45,204 @@ void serial_task(void *pvParameters) {
   }
 }
 
+// bool send_to_serial(const espnow_msg_t *msg) {
+//   if (msg == NULL) {
+//     return false;
+//   }
+
+//   char buffer[512]; // increased because peer list can be large
+//   int len = 0;
+
+//   if (msg->type == MSG_TYPE_INFO) {
+
+//     // Base header (without data)
+//     len = snprintf(buffer, sizeof(buffer),
+//                    "%02X%02X%02X%02X%02X%02X;"
+//                    "%02X%02X%02X%02X%02X%02X;"
+//                    "%02X%02X%02X%02X%02X%02X;"
+//                    "%d;%lu;%u;%u;",
+//                    msg->src_mac[0], msg->src_mac[1], msg->src_mac[2],
+//                    msg->src_mac[3], msg->src_mac[4], msg->src_mac[5],
+
+//                    msg->dest_mac[0], msg->dest_mac[1], msg->dest_mac[2],
+//                    msg->dest_mac[3], msg->dest_mac[4], msg->dest_mac[5],
+
+//                    msg->origin_mac[0], msg->origin_mac[1],
+//                    msg->origin_mac[2], msg->origin_mac[3],
+//                    msg->origin_mac[4], msg->origin_mac[5],
+
+//                    msg->rssi, (unsigned long)msg->msg_id, msg->ttl,
+//                    msg->type);
+
+//     if (len <= 0 || len >= sizeof(buffer))
+//       return false;
+
+//     // Append peer list
+//     for (int i = 0; i < msg->peer_count; i++) {
+//       len += snprintf(
+//           buffer + len, sizeof(buffer) - len, "%02X%02X%02X%02X%02X%02X",
+//           msg->peer_macs[i][0], msg->peer_macs[i][1], msg->peer_macs[i][2],
+//           msg->peer_macs[i][3], msg->peer_macs[i][4], msg->peer_macs[i][5]);
+
+//       if (i < msg->peer_count - 1) {
+//         len += snprintf(buffer + len, sizeof(buffer) - len, ",");
+//       }
+//     }
+
+//     // End line
+//     len += snprintf(buffer + len, sizeof(buffer) - len, "\n");
+
+//   } else {
+
+//     // Normal DATA / ACK / DISCOVERY
+//     len = snprintf(buffer, sizeof(buffer),
+//                    "%02X%02X%02X%02X%02X%02X;"
+//                    "%02X%02X%02X%02X%02X%02X;"
+//                    "%02X%02X%02X%02X%02X%02X;"
+//                    "%d;%lu;%u;%u;%s\n",
+
+//                    msg->src_mac[0], msg->src_mac[1], msg->src_mac[2],
+//                    msg->src_mac[3], msg->src_mac[4], msg->src_mac[5],
+
+//                    msg->dest_mac[0], msg->dest_mac[1], msg->dest_mac[2],
+//                    msg->dest_mac[3], msg->dest_mac[4], msg->dest_mac[5],
+
+//                    msg->origin_mac[0], msg->origin_mac[1],
+//                    msg->origin_mac[2], msg->origin_mac[3],
+//                    msg->origin_mac[4], msg->origin_mac[5],
+
+//                    msg->rssi, (unsigned long)msg->msg_id, msg->ttl,
+//                    msg->type, msg->data);
+//   }
+
+//   if (len <= 0 || len >= sizeof(buffer)) {
+//     return false;
+//   }
+
+//   int written = uart_write_bytes(UART_PORT, buffer, len);
+//   return (written == len);
+// }
+
+// bool send_to_serial(const espnow_msg_t *msg) {
+//   if (msg == NULL) {
+//     return false;
+//   }
+
+//   char buffer[512];
+//   int len = 0;
+
+//   // guarantee data termination
+//   char data_safe[DATA_SIZE + 1];
+//   memcpy(data_safe, msg->data, DATA_SIZE);
+//   data_safe[DATA_SIZE] = '\0';
+
+//   if (msg->type == MSG_TYPE_INFO) {
+
+//     char json[256];
+//     int jlen = 0;
+
+//     jlen += snprintf(json + jlen, sizeof(json) - jlen,
+//                      "{\"peer_count\":%u,\"peer_macs\":[", msg->peer_count);
+
+//     for (int i = 0; i < msg->peer_count; i++) {
+
+//       jlen += snprintf(
+//           json + jlen, sizeof(json) - jlen,
+//           "\"%02X:%02X:%02X:%02X:%02X:%02X\"", msg->peer_macs[i][0],
+//           msg->peer_macs[i][1], msg->peer_macs[i][2], msg->peer_macs[i][3],
+//           msg->peer_macs[i][4], msg->peer_macs[i][5]);
+
+//       if (i < msg->peer_count - 1) {
+//         jlen += snprintf(json + jlen, sizeof(json) - jlen, ",");
+//       }
+//     }
+
+//     jlen += snprintf(json + jlen, sizeof(json) - jlen, "]}");
+
+//     len = snprintf(buffer, sizeof(buffer),
+//                    "%02X:%02X:%02X:%02X:%02X:%02X;"
+//                    "%02X:%02X:%02X:%02X:%02X:%02X;"
+//                    "%02X:%02X:%02X:%02X:%02X:%02X;"
+//                    "%d;%lu;%u;%u;%s;%s;%s\n",
+
+//                    msg->src_mac[0], msg->src_mac[1], msg->src_mac[2],
+//                    msg->src_mac[3], msg->src_mac[4], msg->src_mac[5],
+
+//                    msg->dest_mac[0], msg->dest_mac[1], msg->dest_mac[2],
+//                    msg->dest_mac[3], msg->dest_mac[4], msg->dest_mac[5],
+
+//                    msg->origin_mac[0], msg->origin_mac[1],
+//                    msg->origin_mac[2], msg->origin_mac[3],
+//                    msg->origin_mac[4], msg->origin_mac[5],
+
+//                    msg->rssi, (unsigned long)msg->msg_id, msg->ttl,
+//                    msg->type, msg->is_root ? "true" : "false", msg->forwarded
+//                    ? "true" : "false", json);
+//   } else {
+
+//     len = snprintf(buffer, sizeof(buffer),
+//                    "%02X:%02X:%02X:%02X:%02X:%02X;"
+//                    "%02X:%02X:%02X:%02X:%02X:%02X;"
+//                    "%02X:%02X:%02X:%02X:%02X:%02X;"
+//                    "%d;%lu;%u;%u;%s;%s;%s\n",
+
+//                    msg->src_mac[0], msg->src_mac[1], msg->src_mac[2],
+//                    msg->src_mac[3], msg->src_mac[4], msg->src_mac[5],
+
+//                    msg->dest_mac[0], msg->dest_mac[1], msg->dest_mac[2],
+//                    msg->dest_mac[3], msg->dest_mac[4], msg->dest_mac[5],
+
+//                    msg->origin_mac[0], msg->origin_mac[1],
+//                    msg->origin_mac[2], msg->origin_mac[3],
+//                    msg->origin_mac[4], msg->origin_mac[5],
+
+//                    msg->rssi, (unsigned long)msg->msg_id, msg->ttl,
+//                    msg->type, msg->is_root ? "true" : "false", msg->forwarded
+//                    ? "true" : "false", data_safe);
+//   }
+
+//   if (len <= 0 || len >= sizeof(buffer)) {
+//     return false;
+//   }
+
+//   int written = uart_write_bytes(UART_PORT, buffer, len);
+//   return (written == len);
+// }
+
 bool send_to_serial(const espnow_msg_t *msg) {
   if (msg == NULL) {
     return false;
   }
 
-  char buffer[512]; // increased because peer list can be large
-  int len = 0;
+  char buffer[512];
 
-  if (msg->type == MSG_TYPE_INFO) {
+  // guarantee termination
+  char data_safe[DATA_SIZE + 1];
+  memcpy(data_safe, msg->data, DATA_SIZE);
+  data_safe[DATA_SIZE] = '\0';
 
-    // Base header (without data)
-    len = snprintf(buffer, sizeof(buffer),
-                   "%02X%02X%02X%02X%02X%02X;"
-                   "%02X%02X%02X%02X%02X%02X;"
-                   "%02X%02X%02X%02X%02X%02X;"
-                   "%d;%lu;%u;%u;",
-                   msg->src_mac[0], msg->src_mac[1], msg->src_mac[2],
-                   msg->src_mac[3], msg->src_mac[4], msg->src_mac[5],
+  int len = snprintf(buffer, sizeof(buffer),
+                     "%02X:%02X:%02X:%02X:%02X:%02X;"
+                     "%02X:%02X:%02X:%02X:%02X:%02X;"
+                     "%02X:%02X:%02X:%02X:%02X:%02X;"
+                     "%d;%lu;%u;%u;%s;%s;%.*s\n",
 
-                   msg->dest_mac[0], msg->dest_mac[1], msg->dest_mac[2],
-                   msg->dest_mac[3], msg->dest_mac[4], msg->dest_mac[5],
+                     msg->src_mac[0], msg->src_mac[1], msg->src_mac[2],
+                     msg->src_mac[3], msg->src_mac[4], msg->src_mac[5],
 
-                   msg->origin_mac[0], msg->origin_mac[1], msg->origin_mac[2],
-                   msg->origin_mac[3], msg->origin_mac[4], msg->origin_mac[5],
+                     msg->dest_mac[0], msg->dest_mac[1], msg->dest_mac[2],
+                     msg->dest_mac[3], msg->dest_mac[4], msg->dest_mac[5],
 
-                   msg->rssi, (unsigned long)msg->msg_id, msg->ttl, msg->type);
+                     msg->origin_mac[0], msg->origin_mac[1], msg->origin_mac[2],
+                     msg->origin_mac[3], msg->origin_mac[4], msg->origin_mac[5],
 
-    if (len <= 0 || len >= sizeof(buffer))
-      return false;
+                     msg->rssi, (unsigned long)msg->msg_id, msg->ttl, msg->type,
+                     msg->is_root ? "true" : "false",
+                     msg->forwarded ? "true" : "false",
 
-    // Append peer list
-    for (int i = 0; i < msg->peer_count; i++) {
-      len += snprintf(
-          buffer + len, sizeof(buffer) - len, "%02X%02X%02X%02X%02X%02X",
-          msg->peer_macs[i][0], msg->peer_macs[i][1], msg->peer_macs[i][2],
-          msg->peer_macs[i][3], msg->peer_macs[i][4], msg->peer_macs[i][5]);
+                     DATA_SIZE, data_safe); // <-- SAFE LIMIT
 
-      if (i < msg->peer_count - 1) {
-        len += snprintf(buffer + len, sizeof(buffer) - len, ",");
-      }
-    }
-
-    // End line
-    len += snprintf(buffer + len, sizeof(buffer) - len, "\n");
-
-  } else {
-
-    // Normal DATA / ACK / DISCOVERY
-    len = snprintf(buffer, sizeof(buffer),
-                   "%02X%02X%02X%02X%02X%02X;"
-                   "%02X%02X%02X%02X%02X%02X;"
-                   "%02X%02X%02X%02X%02X%02X;"
-                   "%d;%lu;%u;%u;%s\n",
-
-                   msg->src_mac[0], msg->src_mac[1], msg->src_mac[2],
-                   msg->src_mac[3], msg->src_mac[4], msg->src_mac[5],
-
-                   msg->dest_mac[0], msg->dest_mac[1], msg->dest_mac[2],
-                   msg->dest_mac[3], msg->dest_mac[4], msg->dest_mac[5],
-
-                   msg->origin_mac[0], msg->origin_mac[1], msg->origin_mac[2],
-                   msg->origin_mac[3], msg->origin_mac[4], msg->origin_mac[5],
-
-                   msg->rssi, (unsigned long)msg->msg_id, msg->ttl, msg->type,
-                   msg->data);
-  }
-
-  if (len <= 0 || len >= sizeof(buffer)) {
+  if (len < 0 || len >= sizeof(buffer)) {
     return false;
   }
 

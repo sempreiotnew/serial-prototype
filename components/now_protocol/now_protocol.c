@@ -9,12 +9,14 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_now.h"
+#include "esp_random.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
 
 #include "driver/gpio.h"
 #include "nvs_flash.h"
 
+#include "data_serialize.h"
 #include "now_protocol.h"
 #include "serial_communication.h"
 
@@ -30,25 +32,23 @@
 #define CACHE_SIZE 512
 #define DEFAULT_TTL 10
 #define RETRY_INTERVAL_MS 2000
-
-static const uint8_t ESPNOW_BROADCAST_MAC[6] = {0xFF, 0xFF, 0xFF,
-                                                0xFF, 0xFF, 0xFF};
+#define PEER_TIMEOUT_MS 1000
+#define PEER_CHECK_INTERVAL_MS 5000
 
 /* ===================== GLOBAL ===================== */
 
-static uint8_t my_mac[6];
 static QueueHandle_t rx_queue;
 static QueueHandle_t tx_queue;
 static uint32_t local_msg_counter = 1;
 
 /* ===================== PEERS ===================== */
 
-typedef struct {
-  uint8_t mac[6];
-  bool active;
-} peer_t;
+// typedef struct {
+//   uint8_t mac[6];
+//   bool active;
+// } peer_t;
 
-static peer_t peers[MAX_PEERS];
+// static peer_t peers[MAX_PEERS];
 
 /* ===================== ACK TABLE ===================== */
 
@@ -114,6 +114,53 @@ static void blink_led(int n, int d) {
     gpio_set_level(LED_GPIO, 0);
     vTaskDelay(pdMS_TO_TICKS(d));
   }
+}
+
+static void update_peer_last_seen(const uint8_t *mac) {
+  for (int i = 0; i < MAX_PEERS; i++) {
+    if (peers[i].active && mac_equal(peers[i].mac, mac)) {
+      peers[i].last_seen = esp_timer_get_time();
+      return;
+    }
+  }
+}
+static void peer_liveness_task(void *arg) {
+  while (1) {
+    int64_t now = esp_timer_get_time();
+
+    for (int i = 0; i < MAX_PEERS; i++) {
+      if (!peers[i].active)
+        continue;
+
+      int64_t diff_ms = (now - peers[i].last_seen) / 1000;
+
+      if (diff_ms > PEER_TIMEOUT_MS) {
+        ESP_LOGW(TAG, "PEER TIMEOUT %02X:%02X:%02X:%02X:%02X:%02X",
+                 peers[i].mac[0], peers[i].mac[1], peers[i].mac[2],
+                 peers[i].mac[3], peers[i].mac[4], peers[i].mac[5]);
+
+        peers[i].active = false;
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(PEER_CHECK_INTERVAL_MS));
+  }
+}
+
+static bool msg_seen(const espnow_msg_t *m) {
+  for (int i = 0; i < CACHE_SIZE; i++) {
+    if (cache[i].type == m->type && cache[i].msg_id == m->msg_id &&
+        mac_equal(cache[i].origin_mac, m->origin_mac)) {
+      return true;
+    }
+  }
+
+  memcpy(cache[cache_idx].origin_mac, m->origin_mac, 6);
+  cache[cache_idx].msg_id = m->msg_id;
+  cache[cache_idx].type = m->type;
+  cache_idx = (cache_idx + 1) % CACHE_SIZE;
+
+  return false;
 }
 
 static void log_msg(const char *prefix, const espnow_msg_t *m) {
@@ -194,12 +241,27 @@ static void espnow_rx_task(void *arg) {
     if (!xQueueReceive(rx_queue, &msg, portMAX_DELAY))
       continue;
 
+    update_peer_last_seen(msg.src_mac);
+
+    for (int i = 0; i < MAX_PEERS; i++) {
+      if (!peers[i].active)
+        continue;
+
+      if (mac_equal(peers[i].mac, msg.src_mac)) {
+        peers[i].rssi = msg.rssi;
+        peers[i].last_seen = esp_timer_get_time();
+        break;
+      }
+    }
+
     if (msg.type != MSG_TYPE_DISCOVERY) {
       log_msg("RX", &msg);
     }
 
     if (msg.type == MSG_TYPE_DISCOVERY) {
-      add_peer(msg.src_mac);
+      if (msg.rssi >= -90) {
+        add_peer(msg.src_mac);
+      }
     }
 
     if (msg.type == MSG_TYPE_DATA && !mac_equal(msg.origin_mac, my_mac)) {
@@ -277,6 +339,42 @@ static void espnow_tx_task(void *arg) {
       case MSG_TYPE_DISCOVERY:
         espnow_send_checked(ESPNOW_BROADCAST_MAC, &msg);
         break;
+
+      case MSG_TYPE_INFO:
+        uint8_t sent = 0;
+
+        if (msg.forwarded) {
+
+          espnow_send_checked(msg.dest_mac, &msg);
+
+        } else {
+
+          memcpy(msg.src_mac, ZEROS_MAC, 6);
+          memcpy(msg.dest_mac, ALL_NODES_DEST, 6);
+          char *json = espnow_msg_to_json_info(&msg);
+          strncpy(msg.data, json, sizeof(msg.data) - 1);
+          msg.data[sizeof(msg.data) - 1] = '\0';
+          free(json);
+
+          for (int i = 0; i < MAX_PEERS; i++) {
+            if (!peers[i].active)
+              continue;
+
+            memcpy(msg.dest_mac, peers[i].mac, 6);
+            espnow_send_checked(msg.dest_mac, &msg);
+            sent++;
+          }
+
+          if (sent == 0) {
+            msg.is_root = true;
+            memcpy(msg.dest_mac, ESPNOW_BROADCAST_MAC, 6);
+
+            espnow_send_checked(msg.dest_mac, &msg);
+          }
+        }
+
+        break;
+
       default:
         break;
       }
@@ -310,23 +408,32 @@ static void button_task(void *arg) {
     int cur = gpio_get_level(BUTTON_GPIO);
     if (last == 1 && cur == 0) {
       espnow_msg_t msg = {0};
+      data_t payload = {0};
       memcpy(msg.origin_mac, my_mac, 6);
       memcpy(msg.src_mac, my_mac, 6);
-      msg.msg_id = local_msg_counter++;
+      //   msg.msg_id = alarm_counter++;
+      uint64_t msg_id = ((uint64_t)esp_random() << 32) | esp_random();
+      // msg.msg_id = alarm_counter++;
+      msg.msg_id = msg_id;
       msg.ttl = DEFAULT_TTL;
       msg.type = MSG_TYPE_DATA;
-      current_msg_waiting = msg.msg_id;
+      msg.is_root = true;
+      msg.forwarded = false;
 
-      // reset ACK table
-      for (int i = 0; i < MAX_PEERS; i++) {
-        if (peers[i].active) {
-          memcpy(ack_table[i].mac, peers[i].mac, 6);
-          ack_table[i].confirmed = false;
-        } else {
-          memset(ack_table[i].mac, 0, 6);
-          ack_table[i].confirmed = false;
-        }
-      }
+      payload.event_id = msg_id;
+      payload.alarm = true;
+      strcpy(payload.name, "root");
+
+      memcpy(payload.src_mac, ZEROS_MAC, 6);
+      memcpy(payload.origin_mac, my_mac, 6);
+      memcpy(payload.dest_mac, ALL_NODES_DEST, 6);
+
+      char *json = data_msg_to_json(&payload);
+
+      strncpy(msg.data, json, sizeof(msg.data) - 1);
+      msg.data[sizeof(msg.data) - 1] = '\0';
+
+      free(json);
 
       ESP_LOGI(TAG, "BUTTON → DATA id=%lu", msg.msg_id);
       xQueueSend(tx_queue, &msg, 0);
@@ -418,31 +525,37 @@ static void gpio_init_all(void) {
   gpio_config(&btn);
 }
 
+static espnow_msg_t get_info_data() {
+
+  espnow_msg_t msg = {0};
+
+  memcpy(msg.origin_mac, my_mac, 6);
+  memcpy(msg.src_mac, my_mac, 6);
+
+  uint64_t msg_id = ((uint64_t)esp_random() << 32) | esp_random();
+  msg.msg_id = msg_id;
+  msg.ttl = DEFAULT_TTL;
+  msg.type = MSG_TYPE_INFO;
+  msg.is_root = true;
+
+  uint8_t count = 0;
+
+  for (int i = 0; i < MAX_PEERS; i++) {
+    if (!peers[i].active)
+      continue;
+
+    memcpy(msg.peer_macs[count], peers[i].mac, 6);
+    count++;
+  }
+
+  msg.peer_count = count;
+
+  return msg;
+}
 static void info_task(void *arg) {
   while (1) {
 
-    espnow_msg_t msg = {0};
-
-    memcpy(msg.origin_mac, my_mac, 6);
-    memcpy(msg.src_mac, my_mac, 6);
-
-    msg.msg_id = local_msg_counter++;
-    msg.ttl = DEFAULT_TTL;
-    msg.type = MSG_TYPE_INFO;
-
-    uint8_t count = 0;
-
-    for (int i = 0; i < MAX_PEERS; i++) {
-      if (!peers[i].active)
-        continue;
-
-      memcpy(msg.peer_macs[count], peers[i].mac, 6);
-      count++;
-    }
-
-    msg.peer_count = count;
-
-    ESP_LOGI(TAG, "ROOT → sending %d peers", count);
+    espnow_msg_t msg = get_info_data();
 
     xQueueSend(tx_queue, &msg, 0);
 
@@ -463,12 +576,17 @@ void run_now(void) {
   espnow_init();
   esp_wifi_get_mac(WIFI_IF_STA, my_mac);
 
+  espnow_msg_t msg = get_info_data();
+
+  xQueueSend(tx_queue, &msg, 0);
+
   xTaskCreate(espnow_rx_task, "rx", 4096, NULL, 5, NULL);
   xTaskCreate(espnow_tx_task, "tx", 4096, NULL, 5, NULL);
-  xTaskCreate(button_task, "button", 2048, NULL, 4, NULL);
+  xTaskCreate(button_task, "button", 4096, NULL, 4, NULL);
   xTaskCreate(discovery_task, "discovery", 2048, NULL, 3, NULL);
-  xTaskCreate(reliability_task, "reliability", 4096, NULL, 4, NULL);
+  // xTaskCreate(reliability_task, "reliability", 4096, NULL, 4, NULL);
   xTaskCreate(info_task, "info", 4096, NULL, 3, NULL);
+  xTaskCreate(peer_liveness_task, "peer_liveness", 2048, NULL, 2, NULL);
 
   ESP_LOGI(TAG, "ESP-NOW ROOT NODE READY");
 }

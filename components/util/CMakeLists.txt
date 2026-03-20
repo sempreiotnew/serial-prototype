@@ -1,7 +1,8 @@
 idf_component_register(
-    SRCS "serial_communication.c"
+    SRCS 
+        "global_var.c" 
+        "logger.c"
     INCLUDE_DIRS "include"
-    REQUIRES driver 
-        now_protocol
+    REQUIRES 
         structure_types
 )
